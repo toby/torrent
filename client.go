@@ -16,8 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anacrolix/dht"
-	"github.com/anacrolix/dht/krpc"
 	"github.com/anacrolix/log"
 	"github.com/anacrolix/missinggo"
 	"github.com/anacrolix/missinggo/bitmap"
@@ -56,7 +54,7 @@ type Client struct {
 	defaultStorage *storage.Client
 	onClose        []func()
 	conns          []socket
-	dhtServers     []*dht.Server
+	dhtServers     []DHT
 	ipBlockList    iplist.Ranger
 	// Our BitTorrent protocol extension bytes, sent in our BT handshakes.
 	extensionBytes pp.PeerExtensionBits
@@ -110,7 +108,7 @@ func (cl *Client) LocalPort() (port int) {
 	return
 }
 
-func writeDhtServerStatus(w io.Writer, s *dht.Server) {
+func writeDhtServerStatus(w io.Writer, s DHT) {
 	dhtStats := s.Stats()
 	fmt.Fprintf(w, "\t# Nodes: %d (%d good, %d banned)\n", dhtStats.Nodes, dhtStats.GoodNodes, dhtStats.BadNodes)
 	fmt.Fprintf(w, "\tServer ID: %x\n", s.ID())
@@ -129,7 +127,7 @@ func (cl *Client) WriteStatus(_w io.Writer) {
 	fmt.Fprintf(w, "Peer ID: %+q\n", cl.PeerID())
 	fmt.Fprintf(w, "Announce key: %x\n", cl.announceKey())
 	fmt.Fprintf(w, "Banned IPs: %d\n", len(cl.badPeerIPsLocked()))
-	cl.eachDhtServer(func(s *dht.Server) {
+	cl.eachDhtServer(func(s DHT) {
 		fmt.Fprintf(w, "%s DHT server at %s:\n", s.Addr().Network(), s.Addr().String())
 		writeDhtServerStatus(w, s)
 	})
@@ -247,7 +245,12 @@ func NewClient(cfg *ClientConfig) (cl *Client, err error) {
 	if !cfg.NoDHT {
 		for _, s := range cl.conns {
 			if pc, ok := s.(net.PacketConn); ok {
-				ds, err := cl.newDhtServer(pc)
+				var ds DHT
+				if cfg.DHTConnection != nil {
+					ds, err = cfg.DHTConnection(pc)
+				} else {
+					ds, err = DefaultDhtServer(cl, pc)
+				}
 				if err != nil {
 					panic(err)
 				}
@@ -280,30 +283,6 @@ func (cl *Client) enabledPeerNetworks() (ns []string) {
 	return
 }
 
-func (cl *Client) newDhtServer(conn net.PacketConn) (s *dht.Server, err error) {
-	cfg := dht.ServerConfig{
-		IPBlocklist:    cl.ipBlockList,
-		Conn:           conn,
-		OnAnnouncePeer: cl.onDHTAnnouncePeer,
-		PublicIP: func() net.IP {
-			if connIsIpv6(conn) && cl.config.PublicIp6 != nil {
-				return cl.config.PublicIp6
-			}
-			return cl.config.PublicIp4
-		}(),
-		StartingNodes: cl.config.DhtStartingNodes,
-	}
-	s, err = dht.NewServer(&cfg)
-	if err == nil {
-		go func() {
-			if _, err := s.Bootstrap(); err != nil {
-				log.Printf("error bootstrapping dht: %s", err)
-			}
-		}()
-	}
-	return
-}
-
 func firstNonEmptyString(ss ...string) string {
 	for _, s := range ss {
 		if s != "" {
@@ -319,7 +298,7 @@ func (cl *Client) Closed() <-chan struct{} {
 	return cl.closed.C()
 }
 
-func (cl *Client) eachDhtServer(f func(*dht.Server)) {
+func (cl *Client) eachDhtServer(f func(DHT)) {
 	for _, ds := range cl.dhtServers {
 		f(ds)
 	}
@@ -339,7 +318,7 @@ func (cl *Client) Close() {
 	cl.lock()
 	defer cl.unlock()
 	cl.closed.Set()
-	cl.eachDhtServer(func(s *dht.Server) { s.Close() })
+	cl.eachDhtServer(func(s DHT) { s.Close() })
 	cl.closeSockets()
 	for _, t := range cl.torrents {
 		t.close()
@@ -901,14 +880,14 @@ func (cl *Client) sendInitialMessages(conn *connection, torrent *Torrent) {
 }
 
 func (cl *Client) dhtPort() (ret uint16) {
-	cl.eachDhtServer(func(s *dht.Server) {
+	cl.eachDhtServer(func(s DHT) {
 		ret = uint16(missinggo.AddrPort(s.Addr()))
 	})
 	return
 }
 
 func (cl *Client) haveDhtServer() (ret bool) {
-	cl.eachDhtServer(func(_ *dht.Server) {
+	cl.eachDhtServer(func(_ DHT) {
 		ret = true
 	})
 	return
@@ -1034,7 +1013,7 @@ func (cl *Client) AddTorrentInfoHashWithStorage(infoHash metainfo.Hash, specStor
 	new = true
 
 	t = cl.newTorrent(infoHash, specStorage)
-	cl.eachDhtServer(func(s *dht.Server) {
+	cl.eachDhtServer(func(s DHT) {
 		go t.dhtAnnouncer(s)
 	})
 	cl.torrents[infoHash] = t
@@ -1151,7 +1130,7 @@ func (cl *Client) AddTorrentFromFile(filename string) (T *Torrent, err error) {
 	return cl.AddTorrent(mi)
 }
 
-func (cl *Client) DhtServers() []*dht.Server {
+func (cl *Client) DhtServers() []DHT {
 	return cl.dhtServers
 }
 
@@ -1163,14 +1142,8 @@ func (cl *Client) AddDHTNodes(nodes []string) {
 			log.Printf("won't add DHT node with bad IP: %q", hmp.Host)
 			continue
 		}
-		ni := krpc.NodeInfo{
-			Addr: krpc.NodeAddr{
-				IP:   ip,
-				Port: hmp.Port,
-			},
-		}
-		cl.eachDhtServer(func(s *dht.Server) {
-			s.AddNode(ni)
+		cl.eachDhtServer(func(s DHT) {
+			s.AddNode(ip, hmp.Port)
 		})
 	}
 }
@@ -1202,7 +1175,7 @@ func (cl *Client) newConnection(nc net.Conn, outgoing bool, remoteAddr ipPort, n
 	return
 }
 
-func (cl *Client) onDHTAnnouncePeer(ih metainfo.Hash, p dht.Peer) {
+func (cl *Client) onDHTAnnouncePeer(ih metainfo.Hash, ip net.IP, port int) {
 	cl.lock()
 	defer cl.unlock()
 	t := cl.torrent(ih)
@@ -1210,8 +1183,8 @@ func (cl *Client) onDHTAnnouncePeer(ih metainfo.Hash, p dht.Peer) {
 		return
 	}
 	t.addPeers([]Peer{{
-		IP:     p.IP,
-		Port:   p.Port,
+		IP:     ip,
+		Port:   port,
 		Source: peerSourceDHTAnnouncePeer,
 	}})
 }

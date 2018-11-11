@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/anacrolix/dht"
 	"github.com/anacrolix/missinggo"
 	"github.com/anacrolix/missinggo/expect"
 	"github.com/anacrolix/torrent/iplist"
@@ -32,8 +31,9 @@ type ClientConfig struct {
 	DisablePEX      bool `long:"disable-pex"`
 
 	// Don't create a DHT.
-	NoDHT            bool `long:"disable-dht"`
-	DhtStartingNodes dht.StartingNodesGetter
+	NoDHT bool `long:"disable-dht"`
+	// Factory method to create DHT servers from a given net.Conn.
+	DHTConnection func(conn net.PacketConn) (DHT, error)
 	// Never send chunks to peers.
 	NoUpload bool `long:"no-upload"`
 	// Disable uploading even when it isn't fair.
@@ -135,18 +135,18 @@ func NewDefaultClientConfig() *ClientConfig {
 	return &ClientConfig{
 		HTTPUserAgent:                  DefaultHTTPUserAgent,
 		ExtendedHandshakeClientVersion: "go.torrent dev 20150624",
-		Bep20:                      "-GT0001-",
-		NominalDialTimeout:         20 * time.Second,
-		MinDialTimeout:             3 * time.Second,
-		EstablishedConnsPerTorrent: 50,
-		HalfOpenConnsPerTorrent:    25,
-		TorrentPeersHighWater:      500,
-		TorrentPeersLowWater:       50,
-		HandshakesTimeout:          4 * time.Second,
-		DhtStartingNodes:           dht.GlobalBootstrapAddrs,
-		ListenHost:                 func(string) string { return "" },
-		UploadRateLimiter:          unlimited,
-		DownloadRateLimiter:        unlimited,
+		Bep20:                          "-GT0001-",
+		NominalDialTimeout:             20 * time.Second,
+		MinDialTimeout:                 3 * time.Second,
+		EstablishedConnsPerTorrent:     50,
+		HalfOpenConnsPerTorrent:        25,
+		TorrentPeersHighWater:          500,
+		TorrentPeersLowWater:           50,
+		HandshakesTimeout:              4 * time.Second,
+		// DhtStartingNodes:               dht.GlobalBootstrapAddrs,
+		ListenHost:          func(string) string { return "" },
+		UploadRateLimiter:   unlimited,
+		DownloadRateLimiter: unlimited,
 	}
 }
 

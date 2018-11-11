@@ -15,7 +15,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/anacrolix/dht"
 	"github.com/anacrolix/log"
 	"github.com/anacrolix/missinggo"
 	"github.com/anacrolix/missinggo/bitmap"
@@ -1346,7 +1345,7 @@ func (t *Torrent) announceRequest() tracker.AnnounceRequest {
 
 // Adds peers revealed in an announce until the announce ends, or we have
 // enough peers.
-func (t *Torrent) consumeDHTAnnounce(pvs <-chan dht.PeersValues) {
+func (t *Torrent) consumeDHTAnnounce(pvs <-chan PeersValues) {
 	cl := t.cl
 	// Count all the unique addresses we got during this announce.
 	allAddrs := make(map[string]struct{})
@@ -1386,18 +1385,17 @@ func (t *Torrent) consumeDHTAnnounce(pvs <-chan dht.PeersValues) {
 	}
 }
 
-func (t *Torrent) announceDHT(impliedPort bool, s *dht.Server) (err error) {
+func (t *Torrent) announceDHT(impliedPort bool, s DHT) (err error) {
 	cl := t.cl
 	ps, err := s.Announce(t.infoHash, cl.incomingPeerPort(), impliedPort)
 	if err != nil {
 		return
 	}
-	t.consumeDHTAnnounce(ps.Peers)
-	ps.Close()
+	t.consumeDHTAnnounce(ps)
 	return
 }
 
-func (t *Torrent) dhtAnnouncer(s *dht.Server) {
+func (t *Torrent) dhtAnnouncer(s DHT) {
 	cl := t.cl
 	for {
 		select {
